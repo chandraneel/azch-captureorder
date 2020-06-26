@@ -1,0 +1,63 @@
+on: [push]
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    
+    - uses: actions/checkout@master
+    
+    - uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Create ACR
+      id: create-acr
+      run: |
+        az acr create -n cctest132 -g cctest1328a3d-rg --location "West US 2" --sku Standard --admin-enabled
+        echo "::set-output name=acr_username::`az acr credential show -n cctest132 --query username | xargs`"
+        echo "::set-output name=acr_password::`az acr credential show -n cctest132 --query passwords[0].value | xargs`"
+        echo "::add-mask::`az acr credential show -n cctest132 --query passwords[0].value | xargs`"
+
+    - uses: azure/docker-login@v1
+      with:
+        login-server: cctest132.azurecr.io
+        username: ${{ steps.create-acr.outputs.acr_username }}
+        password: ${{ steps.create-acr.outputs.acr_password }}
+
+    - name: Build and push image to ACR
+      id: build-image
+      run: |
+        docker build "$GITHUB_WORKSPACE/" -f  "Dockerfile" -t cctest132.azurecr.io/proxynorbaccluster2:${{ github.sha }}
+        docker push cctest132.azurecr.io/proxynorbaccluster2:${{ github.sha }}
+    
+    - uses: azure/k8s-set-context@v1
+      id: login
+      with:
+         kubeconfig: ${{ secrets.aks_proxynorbaccluster2_kubeConfig }}
+    
+    - name: Create namespace
+      run: |
+        namespacePresent=`kubectl get namespace | grep proxynorbaccluster2cad3 | wc -l`
+        if [ $namespacePresent -eq 0 ]
+        then
+            echo `kubectl create namespace proxynorbaccluster2cad3`
+        fi
+
+    - uses: azure/k8s-create-secret@v1
+      with:
+        namespace: proxynorbaccluster2cad3
+        container-registry-url: cctest132.azurecr.io
+        container-registry-username: ${{ steps.create-acr.outputs.acr_username }}
+        container-registry-password: ${{ steps.create-acr.outputs.acr_password }}
+        secret-name: proxynorbaccdockerauth
+       
+    - uses: azure/k8s-deploy@v1
+      with:
+        namespace: proxynorbaccluster2cad3
+        manifests: |
+          manifests/deployment-1.yml
+          manifests/service-1.yml
+        images: |
+          cctest132.azurecr.io/proxynorbaccluster2:${{ github.sha }}
+        imagepullsecrets: |
+          proxynorbaccdockerauth
